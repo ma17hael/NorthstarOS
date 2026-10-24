@@ -5,3 +5,7 @@ version = 4
 [[package]]
 name = "northstar-boot"
 version = "0.1.0"
+
+[[package]]
+name = "northstar-kernel"
+version = "0.1.0"

@@ -3,6 +3,7 @@
 
 mod boot;
 mod console;
+mod loader;
 mod uefi;
 
 use core::hint::spin_loop;
@@ -15,7 +16,7 @@ pub extern "efiapi" fn efi_main(
     _image_handle: EfiHandle,
     system_table: *mut SystemTable,
 ) -> EfiStatus {
-    let status = boot::run(system_table);
+    let status = boot::run(_image_handle, system_table);
 
     if status != EFI_SUCCESS {
         return status;

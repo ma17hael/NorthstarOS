@@ -1,4 +1,6 @@
+pub mod file;
 pub mod protocol;
+pub mod services;
 pub mod table;
 pub mod types;
 

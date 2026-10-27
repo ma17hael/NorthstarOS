@@ -5,6 +5,7 @@ mod boot;
 mod console;
 mod elf;
 mod loader;
+mod memory;
 mod uefi;
 
 use core::hint::spin_loop;

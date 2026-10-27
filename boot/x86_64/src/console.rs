@@ -77,4 +77,23 @@ impl Console {
 
         Ok(())
     }
+
+    pub fn write_hex_u64(&mut self, value: u64) -> Result<(), EfiStatus> {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+        let mut buffer = [b'0'; 18];
+        buffer[0] = b'0';
+        buffer[1] = b'x';
+
+        for index in 0..16 {
+            let shift = (15 - index) * 4;
+            let digit = ((value >> shift) & 0xF) as usize;
+
+            buffer[index + 2] = HEX[digit];
+        }
+
+        let text = core::str::from_utf8(&buffer).map_err(|_| EFI_INVALID_PARAMETER)?;
+
+        self.write_ascii(text)
+    }
 }

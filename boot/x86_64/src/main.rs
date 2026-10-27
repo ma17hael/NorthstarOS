@@ -3,6 +3,7 @@
 
 mod boot;
 mod console;
+mod elf;
 mod loader;
 mod uefi;
 

@@ -24,7 +24,9 @@ pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus
         Ok(()) => {
             match console.write_ascii(
                 "Kernel Found\n\
-                ELF64 header validated\n",
+                ELF64 header validated\n\
+                Program headers validated\n\
+                Executable entry point found\n",
             ) {
                 Ok(()) => EFI_SUCCESS,
                 Err(status) => status,

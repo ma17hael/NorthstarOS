@@ -64,4 +64,16 @@ pub struct FileProtocol {
         buffer_size: *mut usize,
         buffer: *mut c_void,
     ) -> EfiStatus,
+
+    pub write: unsafe extern "efiapi" fn(
+        this: *mut FileProtocol,
+        buffer_size: *mut usize,
+        buffer: *const c_void,
+    ) -> EfiStatus,
+
+    pub get_position:
+        unsafe extern "efiapi" fn(this: *mut FileProtocol, position: *mut u64) -> EfiStatus,
+
+    pub set_position:
+        unsafe extern "efiapi" fn(this: *mut FileProtocol, position: u64) -> EfiStatus,
 }

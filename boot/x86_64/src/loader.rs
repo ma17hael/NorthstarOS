@@ -1,3 +1,5 @@
+mod stage;
+
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
@@ -8,6 +10,7 @@ use crate::uefi::file::{
 };
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiHandle, EfiStatus};
+use crate::console::Console;
 
 const EFI_LOAD_ERROR: EfiStatus = (1usize << (usize::BITS - 1)) | 1;
 
@@ -127,6 +130,31 @@ pub fn inspect_kernel(
         if loadable_segments == 0 || !entry_valid {
             return Err(EFI_LOAD_ERROR);
         }
+        // Initialiser la console pour afficher le diagnostic.
+        let mut console = unsafe {
+            Console::from_system_table(system_table)
+        }?;
+
+        console.write_ascii("\nStaging kernel PT_LOAD segments...\n")?;
+        // Reserver les pages, copier et verifier les segments.
+        // Le module stage libere ensuite les pages.
+        let report = stage::stage_kernel(file, services, &elf)?;
+
+        console.write_ascii("Loadable segments: ")?;
+        console.write_dec_u64(report.segments as u64)?;
+
+        console.write_ascii("\nAllocated pages: ")?;
+        console.write_dec_u64(report.pages as u64)?;
+
+        console.write_ascii("\nTemporary physical base: ")?;
+        console.write_hex_u64(report.physical_base)?;
+
+        console.write_ascii(
+            "\nKernel segments copied successfully\n\
+                   Kernel data verified\n\
+                   Uninitialized memory verified\n\
+                   Temporary pages released\n"
+        )?;
 
         Ok(())
     })();

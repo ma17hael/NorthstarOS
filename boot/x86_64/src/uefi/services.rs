@@ -35,10 +35,18 @@ pub struct BootServices {
         descriptor_size: *mut usize,
         descriptor_version: *mut u32,
     ) -> EfiStatus,
+
+    pub allocate_pool: unsafe extern "efiapi" fn(
+        pool_type: EfiMemoryType,
+        size: usize,
+        buffer: *mut *mut c_void,
+    ) -> EfiStatus,
+
+    pub free_pool: unsafe extern "efiapi" fn(buffer: *mut c_void) -> EfiStatus,
     // 11 services entre GetMemoryMap et HandleProtocol :
     // AllocatePool, FreePool, evenements, temporisateurs
     // et gestion des interfaces de protocoles.
-    _intermediate_services: [usize; 11],
+    _intermediate_services: [usize; 9],
 
     pub handle_protocol: unsafe extern "efiapi" fn(
         handle: EfiHandle,

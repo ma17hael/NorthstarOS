@@ -1,3 +1,5 @@
+pub mod map;
+
 use crate::uefi::services::{ALLOCATE_ANY_PAGES, EFI_LOADER_DATA};
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiStatus};

@@ -55,6 +55,42 @@ pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus
             Memory released successfully\n",
         )?;
 
+        console.write_ascii("\nReading UEFI memory map...\n")?;
+
+        let summary = match memory::map::inspect_memory_map(system_table) {
+            Ok(summary) => summary,
+            Err(status) => {
+                let _ = console.write_ascii("ERROR: Unable to retrieve memory map\nEFI status: ");
+                let _ = console.write_hex_u64(status as u64);
+                let _ = console.write_ascii("\n");
+                return Err(status);
+            }
+        };
+
+        console.write_ascii("Memory map retrieved\n")?;
+
+        console.write_ascii("Descriptors: ")?;
+        console.write_dec_u64(summary.descriptor_count as u64)?;
+
+        console.write_ascii("Descriptor size: ")?;
+        console.write_dec_u64(summary.descriptor_size as u64)?;
+        console.write_ascii(" bytes\n")?;
+
+        console.write_ascii("Conventional memory: ")?;
+        console.write_dec_u64(summary.conventional_pages / 256)?;
+        console.write_ascii(" MiB (rounded down)\n")?;
+
+        console.write_ascii("Boot services pages: ")?;
+        console.write_dec_u64(summary.boot_services_pages)?;
+
+        console.write_ascii("\nRuntime services pages: ")?;
+        console.write_dec_u64(summary.runtime_pages)?;
+
+        console.write_ascii("\nACPI pages: ")?;
+        console.write_dec_u64(summary.acpi_pages)?;
+
+        console.write_ascii("\nMemory map inspection completed\n")?;
+
         Ok(())
     })();
 

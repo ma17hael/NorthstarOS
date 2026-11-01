@@ -96,4 +96,23 @@ impl Console {
 
         self.write_ascii(text)
     }
+
+    pub fn write_dec_u64(&mut self, mut value: u64) -> Result<(), EfiStatus> {
+        let mut buffer = [0u8; 20];
+        let mut index = buffer.len();
+
+        loop {
+            index -= 1;
+            buffer[index] = b'0' + (value % 10) as u8;
+            value /= 10;
+
+            if value == 0 {
+                break;
+            }
+        }
+
+        let text = core::str::from_utf8(&buffer[index..]).map_err(|_| EFI_INVALID_PARAMETER)?;
+
+        self.write_ascii(text)
+    }
 }

@@ -1,8 +1,10 @@
+mod dynamic;
 mod stage;
 
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
+use crate::console::Console;
 use crate::elf::{ElfHeader, PT_LOAD, ProgramHeader};
 use crate::uefi::file::{
     FileProtocol, LOADED_IMAGE_GUID, LoadedImageProtocol, SIMPLE_FILE_SYSTEM_GUID,
@@ -10,7 +12,6 @@ use crate::uefi::file::{
 };
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiHandle, EfiStatus};
-use crate::console::Console;
 
 const EFI_LOAD_ERROR: EfiStatus = (1usize << (usize::BITS - 1)) | 1;
 
@@ -131,9 +132,51 @@ pub fn inspect_kernel(
             return Err(EFI_LOAD_ERROR);
         }
         // Initialiser la console pour afficher le diagnostic.
-        let mut console = unsafe {
-            Console::from_system_table(system_table)
-        }?;
+        let mut console = unsafe { Console::from_system_table(system_table) }?;
+
+        console.write_ascii("\nInspecting ELF dynamic information...\n")?;
+
+        let report = dynamic::inspect_dynamic(file, &elf)?;
+
+        if report.found {
+            console.write_ascii("PT_DYNAMIC found\n")?;
+        } else {
+            console.write_ascii("No PT_DYNAMIC segment\n")?;
+        }
+
+        console.write_ascii("Dynamic entries: ")?;
+        console.write_dec_u64(report.dynamic_entries as u64)?;
+
+        console.write_ascii("\nRELA entries: ")?;
+        console.write_dec_u64(report.rela_entries as u64)?;
+
+        console.write_ascii("\nR_X86_64_RELATIVE: ")?;
+        console.write_dec_u64(report.relative_entries as u64)?;
+
+        console.write_ascii("\nUnsupported relocations: ")?;
+        console.write_dec_u64(report.unsupported_entries as u64)?;
+
+        if let Some(kind) = report.first_unsupported_type {
+            console.write_ascii("\nFirst unsupported type: ")?;
+            console.write_dec_u64(kind as u64)?;
+        }
+
+        console.write_ascii("\nRequired external librairies: ")?;
+        console.write_dec_u64(report.needed_librairies as u64)?;
+
+        if report.other_relocation_formats {
+            console.write_ascii("\nOther relocation formats detected")?;
+        }
+
+        if report.text_relocations {
+            console.write_ascii("\nText relocations detected")?;
+        }
+
+        if report.supported_for_loading() {
+            console.write_ascii("\nNo unsupported dynamic relocation requirements detected\n")?;
+        } else {
+            console.write_ascii("\nWARNING: Kernel relocation support incomplete\n")?;
+        }
 
         console.write_ascii("\nStaging kernel PT_LOAD segments...\n")?;
         // Reserver les pages, copier et verifier les segments.
@@ -153,7 +196,7 @@ pub fn inspect_kernel(
             "\nKernel segments copied successfully\n\
                    Kernel data verified\n\
                    Uninitialized memory verified\n\
-                   Temporary pages released\n"
+                   Temporary pages released\n",
         )?;
 
         Ok(())

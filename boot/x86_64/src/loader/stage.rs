@@ -15,6 +15,8 @@ pub(super) struct StageReport {
     pub physical_base: u64,
     pub pages: usize,
     pub segments: usize,
+    pub virtual_start: u64,
+    pub entry_offset: u64
 }
 
 fn program_header(
@@ -86,6 +88,14 @@ pub(super) fn stage_kernel(
         & !(PAGE_SIZE - 1);
 
     let image_size = image_end.checked_sub(image_start).ok_or(EFI_LOAD_ERROR)?;
+
+    let entry_offset = elf.entry
+        .checked_sub(image_start)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    if entry_offset >= image_size {
+        return Err(EFI_LOAD_ERROR);
+    }
 
     if image_size == 0 || image_size > MAX_IMAGE_SIZE {
         return Err(EFI_LOAD_ERROR);
@@ -192,18 +202,44 @@ pub(super) fn stage_kernel(
 
         Ok(())
     })();
-    // Toujours liberer les pages apres le test.
-    let free_status = unsafe { (services.free_pages)(physical_base, pages) };
+    // En cas d'echec, liberer les pages immediatement.
+    if let Err(error) = result {
+        let free_status = unsafe {
+            (services.free_pages)(physical_base, pages)
+        };
 
-    if free_status != EFI_SUCCESS {
-        return Err(free_status);
+        if free_status != EFI_SUCCESS {
+            return Err(free_status);
+        }
+
+        return Err(error);
     }
-
-    result?;
-
+    // En cas de succes, conserver l'allocation
+    // jusqu'a sa liberation explicite.
     Ok(StageReport {
         physical_base,
         pages,
         segments: segment_count,
+        virtual_start: image_start,
+        entry_offset
     })
+}
+// Liberation explicite, uniquement tant que
+// les services de demarrage UEFI sont actifs.
+pub(super) fn release_kernel(
+    report: StageReport,
+    services: &BootServices
+) -> Result<(), EfiStatus> {
+    let status = unsafe {
+        (services.free_pages)(
+            report.physical_base,
+            report.pages
+        )
+    };
+
+    if status != EFI_SUCCESS {
+        return Err(status);
+    }
+
+    Ok(())
 }

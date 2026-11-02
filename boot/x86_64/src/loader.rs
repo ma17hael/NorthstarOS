@@ -182,22 +182,40 @@ pub fn inspect_kernel(
         // Reserver les pages, copier et verifier les segments.
         // Le module stage libere ensuite les pages.
         let report = stage::stage_kernel(file, services, &elf)?;
+        // Effectuer nos diagnostics pendant que
+        // les pages physiques sont encore reservees.
+        let diagnostic = (|| -> Result<(), EfiStatus> {
+            console.write_ascii("Loadable segments: ")?;
+            console.write_dec_u64(report.segments as u64)?;
 
-        console.write_ascii("Loadable segments: ")?;
-        console.write_dec_u64(report.segments as u64)?;
+            console.write_ascii("\nAllocated pages: ")?;
+            console.write_dec_u64(report.pages as u64)?;
 
-        console.write_ascii("\nAllocated pages: ")?;
-        console.write_dec_u64(report.pages as u64)?;
+            console.write_ascii("\nPhysical base: ")?;
+            console.write_hex_u64(report.physical_base)?;
 
-        console.write_ascii("\nTemporary physical base: ")?;
-        console.write_hex_u64(report.physical_base)?;
+            console.write_ascii("\nVirtual image start: ")?;
+            console.write_hex_u64(report.virtual_start)?;
 
-        console.write_ascii(
-            "\nKernel segments copied successfully\n\
-                   Kernel data verified\n\
-                   Uninitialized memory verified\n\
-                   Temporary pages released\n",
-        )?;
+            console.write_ascii("\nEntry offset: ")?;
+            console.write_hex_u64(report.entry_offset)?;
+
+            console.write_ascii(
+                "\nKernel image retained in memory\n\
+                    Segment data verified\n",
+            )?;
+
+            Ok(())
+        })();
+
+        // Libérer les pages même si l'affichage a échoué.
+        let release_result = stage::release_kernel(report, services);
+
+        // Propager les erreurs après la tentative de libération.
+        diagnostic?;
+        release_result?;
+
+        console.write_ascii("Kernel image released after verification\n")?;
 
         Ok(())
     })();

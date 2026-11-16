@@ -1,0 +1,101 @@
+
+name: Northstar OS - CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    name: Validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+    steps:
+      - name: Récupérer les sources
+        uses: actions/checkout@v4
+
+      - name: Installer la toolchain Rust
+        run: |
+          rustup component add rustfmt clippy rust-src
+          rustup target add \
+            x86_64-unknown-uefi \
+            x86_64-unknown-none
+          rustc --version
+          cargo --version
+
+      - name: Installer les outils système
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm clang lld
+
+      - name: Vérifier les manifests
+        run: |
+          test -f Cargo.toml
+          test -f boot/x86_64/Cargo.toml
+          test -f kernel/Cargo.toml
+
+      - name: Vérifier le formatage
+        run: cargo fmt --all -- --check
+
+      - name: Analyser le bootloader avec Clippy
+        run: |
+          cargo clippy \
+            --manifest-path boot/x86_64/Cargo.toml \
+            --target x86_64-unknown-uefi \
+            -- -D warnings
+
+      - name: Analyser le noyau avec Clippy
+        run: |
+          cargo clippy \
+            --manifest-path kernel/Cargo.toml \
+            --target x86_64-unknown-none \
+            -- -D warnings
+
+      - name: Compiler le bootloader UEFI
+        run: |
+          cargo build \
+            --manifest-path boot/x86_64/Cargo.toml \
+            --target x86_64-unknown-uefi \
+            --release
+
+      - name: Compiler le noyau
+        run: |
+          cargo build \
+            --manifest-path kernel/Cargo.toml \
+            --target x86_64-unknown-none \
+            --release
+
+      - name: Tester les binaires produits
+        run: python3 scripts/ci/verify_binaries.py
+
+      - name: Tests unitaires Rust sur l'hôte
+        if: ${{ hashFiles('tests/host/Cargo.toml') != '' }}
+        run: |
+          cargo test \
+            --manifest-path tests/host/Cargo.toml \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Publier les binaires
+        uses: actions/upload-artifact@v4
+        with:
+          name: northstar-os-${{ github.sha }}
+          path: |
+            target/x86_64-unknown-uefi/release/*.efi
+            target/x86_64-unknown-none/release/
+          retention-days: 7
+          if-no-files-found: error

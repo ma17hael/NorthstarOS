@@ -1,6 +1,7 @@
 use crate::console::Console;
 use crate::loader;
 use crate::memory;
+use crate::memory::paging;
 use crate::uefi::EfiHandle;
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_SUCCESS, EfiStatus};
@@ -90,6 +91,25 @@ pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus
         console.write_dec_u64(summary.acpi_pages)?;
 
         console.write_ascii("\nMemory map inspection completed\n")?;
+
+        console.write_ascii("\nPreparing x86-64 page tables...\n")?;
+
+        let paging = paging::test_mapping(system_table)?;
+
+        console.write_ascii("PML4 physical base: ")?;
+        console.write_hex_u64(paging.pml4_physical)?;
+
+        console.write_ascii("\nTest virtual address: ")?;
+        console.write_hex_u64(paging.virtual_address)?;
+
+        console.write_ascii("\nMapped physical address: ")?;
+        console.write_hex_u64(paging.target_physical)?;
+
+        console.write_ascii(
+            "\nPage table entries verified\n\
+                Paging Test completed\n\
+                Temporary paging pages released\n",
+        )?;
 
         Ok(())
     })();

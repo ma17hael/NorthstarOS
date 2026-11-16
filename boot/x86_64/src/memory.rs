@@ -1,4 +1,5 @@
 pub mod map;
+pub mod paging;
 
 use crate::uefi::services::{ALLOCATE_ANY_PAGES, EFI_LOADER_DATA};
 use crate::uefi::table::SystemTable;

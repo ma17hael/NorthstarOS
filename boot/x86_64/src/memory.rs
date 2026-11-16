@@ -29,7 +29,7 @@ pub fn test_allocation(system_table: *mut SystemTable) -> Result<u64, EfiStatus>
         return Err(status);
     }
     // 2. Verifier l'alignement de l'adresse
-    let aligned = address % PAGE_SIZE == 0;
+    let aligned = address.is_multiple_of(PAGE_SIZE);
     // 3. Liberer les pages, meme si l'alignement
     // obtenu etait incorrect.
     let free_status = unsafe { (services.free_pages)(address, TEST_PAGES) };

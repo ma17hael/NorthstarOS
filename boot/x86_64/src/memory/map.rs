@@ -137,7 +137,7 @@ fn summarize_map(
     if descriptor_size < size_of::<MemoryDescriptor>()
         || map_size == 0
         || map_size > capacity
-        || map_size % descriptor_size != 0
+        || !map_size.is_multiple_of(descriptor_size)
     {
         return Err(EFI_LOAD_ERROR);
     }

@@ -110,10 +110,11 @@ fn valid_target(file: *mut FileProtocol, elf: &ElfHeader, address: u64) -> Resul
             continue;
         }
 
-        if let Some(relative) = address.checked_sub(segment.virtual_address) {
-            if relative <= segment.memory_size && 8 <= segment.memory_size - relative {
-                return Ok(true);
-            }
+        if let Some(relative) = address.checked_sub(segment.virtual_address)
+            && relative <= segment.memory_size
+            && 8 <= segment.memory_size - relative
+        {
+            return Ok(true);
         }
     }
 
@@ -138,10 +139,8 @@ pub(super) fn inspect_dynamic(
     for index in 0..usize::from(elf.program_header_count) {
         let segment = read_program_header(file, elf, index)?;
 
-        if segment.segment_type == PT_DYNAMIC {
-            if dynamic_segment.replace(segment).is_some() {
-                return Err(EFI_LOAD_ERROR);
-            }
+        if segment.segment_type == PT_DYNAMIC && dynamic_segment.replace(segment).is_some() {
+            return Err(EFI_LOAD_ERROR);
         }
     }
 

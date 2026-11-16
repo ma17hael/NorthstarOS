@@ -120,7 +120,7 @@ pub(super) fn stage_kernel(
     // Le bloc est temporaire. Toutes les erreurs de
     // chargement doivent conduire a FreePages().
     let result = (|| -> Result<(), EfiStatus> {
-        if physical_base == 0 || physical_base % PAGE_SIZE != 0 {
+        if physical_base == 0 || !physical_base.is_multiple_of(PAGE_SIZE) {
             return Err(EFI_LOAD_ERROR);
         }
 

@@ -55,7 +55,7 @@ fn read_program_header(
     index: usize,
 ) -> Result<ProgramHeader, EfiStatus> {
     let relative = (index as u64)
-        .checked_add(PROGRAM_HEADER_SIZE as u64)
+        .checked_mul(PROGRAM_HEADER_SIZE as u64)
         .ok_or(EFI_LOAD_ERROR)?;
 
     let offset = elf

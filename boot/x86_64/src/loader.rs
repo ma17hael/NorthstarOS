@@ -11,6 +11,7 @@ use crate::uefi::file::{
     FileProtocol, LOADED_IMAGE_GUID, LoadedImageProtocol, SIMPLE_FILE_SYSTEM_GUID,
     SimpleFileSystemProtocol,
 };
+use crate::uefi::services::BootServices;
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiHandle, EfiStatus};
 
@@ -18,10 +19,28 @@ const EFI_LOAD_ERROR: EfiStatus = (1usize << (usize::BITS - 1)) | 1;
 
 const EFI_FILE_MODE_READ: u64 = 1;
 
-pub fn inspect_kernel(
+pub(crate) struct PreparedKernel {
+    kernel: stage::StageReport,
+    mapping: mapping::MappingReport,
+}
+
+impl PreparedKernel {
+    // Liberation explicite avant ExitBootServices.
+    // Les deux allocations doivent être traitees,
+    // meme si la premiere libération echoue.
+    pub(crate) fn release(self, services: &BootServices) -> Result<(), EfiStatus> {
+        let mapping_result = mapping::release_kernel_mapping(self.mapping, services);
+        let kernel_result = stage::release_kernel(self.kernel, services);
+
+        mapping_result?;
+        kernel_result
+    }
+}
+
+pub fn prepare_kernel(
     image_handle: EfiHandle,
     system_table: *mut SystemTable,
-) -> Result<(), EfiStatus> {
+) -> Result<PreparedKernel, EfiStatus> {
     let table = unsafe { system_table.as_ref() }.ok_or(EFI_INVALID_PARAMETER)?;
 
     let services = unsafe { table.boot_services.as_ref() }.ok_or(EFI_INVALID_PARAMETER)?;
@@ -93,7 +112,7 @@ pub fn inspect_kernel(
         });
     }
     //Analyser le noyau tout en conservant les handles ouverts
-    let result = (|| -> Result<(), EfiStatus> {
+    let result = (|| -> Result<PreparedKernel, EfiStatus> {
         // 1. Lire l'en tete ELF64
         let mut header_bytes = [0u8; 64];
 
@@ -180,89 +199,85 @@ pub fn inspect_kernel(
         }
 
         console.write_ascii("\nStaging kernel PT_LOAD segments...\n")?;
-        // Reserver les pages, copier et verifier les segments.
-        // Le module stage libere ensuite les pages.
-        let kernel = stage::stage_kernel(file, services, &elf)?;
 
-        let verification = (|| -> Result<(), EfiStatus> {
-            console.write_ascii("\nKernel image loaded\n")?;
+        let kernel = stage::stage_kernel(file, services, &elf)?;
+        // Construire les tables de pagination
+        // En cas d'erreur, liberer l'image du noyau.
+        let mapping = match mapping::build_kernel_mapping(file, services, &elf, &kernel) {
+            Ok(mapping) => mapping,
+            Err(status) => {
+                stage::release_kernel(kernel, services)?;
+                return Err(status);
+            }
+        };
+        // Les deux allocations sont maintenant actives.
+        let diagnostic = (|| -> Result<(), EfiStatus> {
+            console.write_ascii("\nKernel image and page tables retained\n")?;
 
             console.write_ascii("Loadable segments: ")?;
             console.write_dec_u64(kernel.segments as u64)?;
 
-            console.write_ascii("\nPhysical base: ")?;
+            console.write_ascii("\nKernel physical base: ")?;
             console.write_hex_u64(kernel.physical_base)?;
 
-            console.write_ascii("\nAllocated pages: ")?;
+            console.write_ascii("\nKernel allocated pages: ")?;
             console.write_dec_u64(kernel.pages as u64)?;
 
-            console.write_ascii("\nPreparing kernel virtual mapping...\n")?;
+            console.write_ascii("\nPML4 physical base: ")?;
+            console.write_hex_u64(mapping.pml4_physical)?;
 
-            let mapping = mapping::build_kernel_mapping(file, services, &elf, &kernel)?;
+            console.write_ascii("\nKernel virtual base: ")?;
+            console.write_hex_u64(mapping.virtual_base)?;
 
-            let diagnostic = (|| -> Result<(), EfiStatus> {
-                console.write_ascii("PML4 physical base: ")?;
-                console.write_hex_u64(mapping.pml4_physical)?;
+            console.write_ascii("\nKernel entry virtual: ")?;
+            console.write_hex_u64(mapping.entry_virtual)?;
 
-                console.write_ascii("\nKernel virtual base: ")?;
-                console.write_hex_u64(mapping.virtual_base)?;
+            console.write_ascii("\nMapped pages: ")?;
+            console.write_dec_u64(mapping.mapped_pages as u64)?;
 
-                console.write_ascii("\nKernel entry virtual: ")?;
-                console.write_hex_u64(mapping.entry_virtual)?;
+            console.write_ascii("\nWritable pages: ")?;
+            console.write_dec_u64(mapping.writable_pages as u64)?;
 
-                console.write_ascii("\nMapped pages: ")?;
-                console.write_dec_u64(mapping.mapped_pages as u64)?;
+            console.write_ascii("\nExecutable pages: ")?;
+            console.write_dec_u64(mapping.executable_pages as u64)?;
 
-                console.write_ascii("\nWritable pages: ")?;
-                console.write_dec_u64(mapping.writable_pages as u64)?;
-
-                console.write_ascii("\nExecutable pages: ")?;
-                console.write_dec_u64(mapping.executable_pages as u64)?;
-
-                console.write_ascii("\nKernel page tables verified\n")?;
-
-                Ok(())
-            })();
-            // Pour ce test, liberer explicitement les tables,
-            // meme si le diagnostic a echoue.
-            let mapping_cleanup = mapping::release_kernel_mapping(mapping, services);
-
-            mapping_cleanup?;
-            diagnostic?;
-
-            console.write_ascii("Kernel page tables released\n")?;
+            console.write_ascii("\nPreparedKernel initialized successfully\n")?;
 
             Ok(())
         })();
+        // Nettoyer les allocations si le diagnostic echoue
+        if let Err(status) = diagnostic {
+            let prepared = PreparedKernel { kernel, mapping };
 
-        // Le noyau reste alloue durant tout la verification
-        // Le liberer aussi en cas d'echec de celle-ci
-        let kernel_cleanup = stage::release_kernel(kernel, services);
-
-        // Propager les erreurs après la tentative de libération.
-        verification?;
-        kernel_cleanup?;
-
-        console.write_ascii("Kernel physical pages released\n")?;
-
-        Ok(())
+            prepared.release(services)?;
+            return Err(status);
+        }
+        // Transferer la propriete des allocations
+        // au reste du processus de demarrage
+        Ok(PreparedKernel { kernel, mapping })
     })();
     // Fermer les handles, meme en cas d'echec du parseur.
     let file_close_status = unsafe { ((*file).close)(file) };
 
     let root_close_status = unsafe { ((*root).close)(root) };
 
-    result?;
+    let prepared = result?;
+    // Les handles on ete fermes.
+    // Si une fermeture a echoue, liberer aussi les pages.
+    let close_error = if file_close_status != EFI_SUCCESS {
+        Some(file_close_status)
+    } else if root_close_status != EFI_SUCCESS {
+        Some(root_close_status)
+    } else {
+        None
+    };
 
-    if file_close_status != EFI_SUCCESS {
-        return Err(file_close_status);
+    if let Some(status) = close_error {
+        prepared.release(services)?;
+        return Err(status);
     }
 
-    if root_close_status != EFI_SUCCESS {
-        return Err(root_close_status);
-    }
-
-    Ok(())
+    Ok(prepared)
 }
 
 fn read_exact_at(file: *mut FileProtocol, offset: u64, buffer: &mut [u8]) -> Result<(), EfiStatus> {

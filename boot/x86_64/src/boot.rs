@@ -5,7 +5,7 @@ use crate::memory::paging;
 use crate::serial;
 use crate::uefi::EfiHandle;
 use crate::uefi::table::SystemTable;
-use crate::uefi::types::{EFI_SUCCESS, EfiStatus};
+use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiStatus};
 
 pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus {
     serial::init();
@@ -26,94 +26,117 @@ pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus
         // Validation du noyau ELF64.
         console.write_ascii("Searching for Northstar Kernel...\n")?;
 
-        if let Err(status) = loader::inspect_kernel(image_handle, system_table) {
-            let _ = console.write_ascii("ERROR: Kernel validation failed\n");
-            return Err(status);
-        }
+        let table = unsafe { system_table.as_ref() }.ok_or(EFI_INVALID_PARAMETER)?;
 
-        console.write_ascii(
-            "Kernel found\n\
-            ELF64 header validated\n\
-            Program headers validated\n\
-            Executable entry point found\n\n",
-        )?;
-        // Test des services de gestion mémoire.
-        console.write_ascii("Initializing memory services...\n")?;
+        let services = unsafe { table.boot_services.as_ref() }.ok_or(EFI_INVALID_PARAMETER)?;
 
-        let address = match memory::test_allocation(system_table) {
-            Ok(address) => address,
+        let prepared = match loader::prepare_kernel(image_handle, system_table) {
+            Ok(prepared) => prepared,
             Err(status) => {
-                let _ = console.write_ascii("ERROR: Memory allocation test failed\n");
+                let _ = console.write_ascii("ERROR: Kernel preparation failed\n");
+
                 return Err(status);
             }
         };
+        // Conserver le noyau et ses tables pendant
+        // l'ensemble des diagnostics suivants.
+        let continuation = (|| -> Result<(), EfiStatus> {
+            console.write_ascii(
+                "Kernel found\n\
+                ELF64 header validated\n\
+                Program headers validated\n\
+                Executable entry point found\n\n",
+            )?;
+            // Test des services de gestion mémoire.
+            console.write_ascii("Initializing memory services...\n")?;
 
-        console.write_ascii(
-            "Allocated 4 pages (16 KiB)\n\
-            Physical address: ",
-        )?;
+            let address = match memory::test_allocation(system_table) {
+                Ok(address) => address,
+                Err(status) => {
+                    let _ = console.write_ascii("ERROR: Memory allocation test failed\n");
+                    return Err(status);
+                }
+            };
 
-        console.write_hex_u64(address)?;
+            console.write_ascii(
+                "Allocated 4 pages (16 KiB)\n\
+                Physical address: ",
+            )?;
 
-        console.write_ascii(
-            "\nMemory alignement verified\n\
-            Memory released successfully\n",
-        )?;
+            console.write_hex_u64(address)?;
 
-        console.write_ascii("\nReading UEFI memory map...\n")?;
+            console.write_ascii(
+                "\nMemory alignement verified\n\
+                Memory released successfully\n",
+            )?;
 
-        let summary = match memory::map::inspect_memory_map(system_table) {
-            Ok(summary) => summary,
-            Err(status) => {
-                let _ = console.write_ascii("ERROR: Unable to retrieve memory map\nEFI status: ");
-                let _ = console.write_hex_u64(status as u64);
-                let _ = console.write_ascii("\n");
-                return Err(status);
-            }
-        };
+            console.write_ascii("\nReading UEFI memory map...\n")?;
 
-        console.write_ascii("Memory map retrieved\n")?;
+            let summary = match memory::map::inspect_memory_map(system_table) {
+                Ok(summary) => summary,
+                Err(status) => {
+                    let _ =
+                        console.write_ascii("ERROR: Unable to retrieve memory map\nEFI status: ");
+                    let _ = console.write_hex_u64(status as u64);
+                    let _ = console.write_ascii("\n");
+                    return Err(status);
+                }
+            };
 
-        console.write_ascii("Descriptors: ")?;
-        console.write_dec_u64(summary.descriptor_count as u64)?;
+            console.write_ascii("Memory map retrieved\n")?;
 
-        console.write_ascii("Descriptor size: ")?;
-        console.write_dec_u64(summary.descriptor_size as u64)?;
-        console.write_ascii(" bytes\n")?;
+            console.write_ascii("Descriptors: ")?;
+            console.write_dec_u64(summary.descriptor_count as u64)?;
 
-        console.write_ascii("Conventional memory: ")?;
-        console.write_dec_u64(summary.conventional_pages / 256)?;
-        console.write_ascii(" MiB (rounded down)\n")?;
+            console.write_ascii("\nDescriptor size: ")?;
+            console.write_dec_u64(summary.descriptor_size as u64)?;
+            console.write_ascii(" bytes\n")?;
 
-        console.write_ascii("Boot services pages: ")?;
-        console.write_dec_u64(summary.boot_services_pages)?;
+            console.write_ascii("Conventional memory: ")?;
+            console.write_dec_u64(summary.conventional_pages / 256)?;
+            console.write_ascii(" MiB (rounded down)\n")?;
 
-        console.write_ascii("\nRuntime services pages: ")?;
-        console.write_dec_u64(summary.runtime_pages)?;
+            console.write_ascii("Boot services pages: ")?;
+            console.write_dec_u64(summary.boot_services_pages)?;
 
-        console.write_ascii("\nACPI pages: ")?;
-        console.write_dec_u64(summary.acpi_pages)?;
+            console.write_ascii("\nRuntime services pages: ")?;
+            console.write_dec_u64(summary.runtime_pages)?;
 
-        console.write_ascii("\nMemory map inspection completed\n")?;
+            console.write_ascii("\nACPI pages: ")?;
+            console.write_dec_u64(summary.acpi_pages)?;
 
-        console.write_ascii("\nPreparing x86-64 page tables...\n")?;
+            console.write_ascii("\nMemory map inspection completed\n")?;
 
-        let paging = paging::test_mapping(system_table)?;
+            console.write_ascii("\nPreparing x86-64 page tables...\n")?;
 
-        console.write_ascii("PML4 physical base: ")?;
-        console.write_hex_u64(paging.pml4_physical)?;
+            let paging = paging::test_mapping(system_table)?;
 
-        console.write_ascii("\nTest virtual address: ")?;
-        console.write_hex_u64(paging.virtual_address)?;
+            console.write_ascii("PML4 physical base: ")?;
+            console.write_hex_u64(paging.pml4_physical)?;
 
-        console.write_ascii("\nMapped physical address: ")?;
-        console.write_hex_u64(paging.target_physical)?;
+            console.write_ascii("\nTest virtual address: ")?;
+            console.write_hex_u64(paging.virtual_address)?;
 
-        console.write_ascii(
-            "\nPage table entries verified\n\
-                Paging Test completed\n\
-                Temporary paging pages released\n",
-        )?;
+            console.write_ascii("\nMapped physical address: ")?;
+            console.write_hex_u64(paging.target_physical)?;
+
+            console.write_ascii(
+                "\nPage table entries verified\n\
+                    Paging Test completed\n\
+                    Temporary paging pages released\n",
+            )?;
+            // Fin des diagnostics effectues pendant que
+            // PreparedKernel conserve ses allocations.
+            Ok(())
+        })();
+        // Liberer le noyau et ses tables de pagination,
+        // même si un diagnostic a echoue.
+        let released_result = prepared.release(services);
+        // Verifier la liberation et les diagnostics.
+        released_result?;
+        continuation?;
+
+        console.write_ascii("\nPreparedKernel allocations released\n")?;
 
         Ok(())
     })();

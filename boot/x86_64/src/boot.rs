@@ -2,11 +2,15 @@ use crate::console::Console;
 use crate::loader;
 use crate::memory;
 use crate::memory::paging;
+use crate::serial;
 use crate::uefi::EfiHandle;
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_SUCCESS, EfiStatus};
 
 pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus {
+    serial::init();
+    serial::write_ascii("[SERIAL] Northstar Boot logging initialized\n");
+
     let mut console = match unsafe { Console::from_system_table(system_table) } {
         Ok(console) => console,
         Err(status) => return status,

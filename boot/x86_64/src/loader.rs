@@ -1,4 +1,5 @@
 mod dynamic;
+mod mapping;
 mod stage;
 
 use core::ffi::c_void;
@@ -182,27 +183,45 @@ pub fn inspect_kernel(
         // Reserver les pages, copier et verifier les segments.
         // Le module stage libere ensuite les pages.
         let report = stage::stage_kernel(file, services, &elf)?;
-        // Effectuer nos diagnostics pendant que
-        // les pages physiques sont encore reservees.
+
         let diagnostic = (|| -> Result<(), EfiStatus> {
+            console.write_ascii("\nKernel image loaded\n")?;
+
             console.write_ascii("Loadable segments: ")?;
             console.write_dec_u64(report.segments as u64)?;
+            console.write_ascii("\n")?;
+
+            console.write_ascii("Physical Base: ")?;
+            console.write_hex_u64(report.physical_base)?;
 
             console.write_ascii("\nAllocated pages: ")?;
             console.write_dec_u64(report.pages as u64)?;
 
-            console.write_ascii("\nPhysical base: ")?;
-            console.write_hex_u64(report.physical_base)?;
+            console.write_ascii("\nPreparing kernel virtual mapping...\n")?;
 
-            console.write_ascii("\nVirtual image start: ")?;
-            console.write_hex_u64(report.virtual_start)?;
+            let mapping = mapping::test_kernel_mapping(file, services, &elf, &report)?;
 
-            console.write_ascii("\nEntry offset: ")?;
-            console.write_hex_u64(report.entry_offset)?;
+            console.write_ascii("PML4 physical base: ")?;
+            console.write_hex_u64(mapping.pml4_physical)?;
+
+            console.write_ascii("\nKernel virtual base: ")?;
+            console.write_hex_u64(mapping.virtual_base)?;
+
+            console.write_ascii("\nKernel entry virtual: ")?;
+            console.write_hex_u64(mapping.entry_virtual)?;
+
+            console.write_ascii("\nMapped pages: ")?;
+            console.write_dec_u64(mapping.mapped_pages as u64)?;
+
+            console.write_ascii("\nWritable pages: ")?;
+            console.write_dec_u64(mapping.writable_pages as u64)?;
+
+            console.write_ascii("\nExecutable pages: ")?;
+            console.write_dec_u64(mapping.executable_pages as u64)?;
 
             console.write_ascii(
-                "\nKernel image retained in memory\n\
-                    Segment data verified\n",
+                "\nKernel page tables verified\n\
+                        Inactive page tables released\n",
             )?;
 
             Ok(())

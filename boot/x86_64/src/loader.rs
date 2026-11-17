@@ -182,59 +182,68 @@ pub fn inspect_kernel(
         console.write_ascii("\nStaging kernel PT_LOAD segments...\n")?;
         // Reserver les pages, copier et verifier les segments.
         // Le module stage libere ensuite les pages.
-        let report = stage::stage_kernel(file, services, &elf)?;
+        let kernel = stage::stage_kernel(file, services, &elf)?;
 
-        let diagnostic = (|| -> Result<(), EfiStatus> {
+        let verification = (|| -> Result<(), EfiStatus> {
             console.write_ascii("\nKernel image loaded\n")?;
 
             console.write_ascii("Loadable segments: ")?;
-            console.write_dec_u64(report.segments as u64)?;
-            console.write_ascii("\n")?;
+            console.write_dec_u64(kernel.segments as u64)?;
 
-            console.write_ascii("Physical Base: ")?;
-            console.write_hex_u64(report.physical_base)?;
+            console.write_ascii("\nPhysical base: ")?;
+            console.write_hex_u64(kernel.physical_base)?;
 
             console.write_ascii("\nAllocated pages: ")?;
-            console.write_dec_u64(report.pages as u64)?;
+            console.write_dec_u64(kernel.pages as u64)?;
 
             console.write_ascii("\nPreparing kernel virtual mapping...\n")?;
 
-            let mapping = mapping::test_kernel_mapping(file, services, &elf, &report)?;
+            let mapping = mapping::build_kernel_mapping(file, services, &elf, &kernel)?;
 
-            console.write_ascii("PML4 physical base: ")?;
-            console.write_hex_u64(mapping.pml4_physical)?;
+            let diagnostic = (|| -> Result<(), EfiStatus> {
+                console.write_ascii("PML4 physical base: ")?;
+                console.write_hex_u64(mapping.pml4_physical)?;
 
-            console.write_ascii("\nKernel virtual base: ")?;
-            console.write_hex_u64(mapping.virtual_base)?;
+                console.write_ascii("\nKernel virtual base: ")?;
+                console.write_hex_u64(mapping.virtual_base)?;
 
-            console.write_ascii("\nKernel entry virtual: ")?;
-            console.write_hex_u64(mapping.entry_virtual)?;
+                console.write_ascii("\nKernel entry virtual: ")?;
+                console.write_hex_u64(mapping.entry_virtual)?;
 
-            console.write_ascii("\nMapped pages: ")?;
-            console.write_dec_u64(mapping.mapped_pages as u64)?;
+                console.write_ascii("\nMapped pages: ")?;
+                console.write_dec_u64(mapping.mapped_pages as u64)?;
 
-            console.write_ascii("\nWritable pages: ")?;
-            console.write_dec_u64(mapping.writable_pages as u64)?;
+                console.write_ascii("\nWritable pages: ")?;
+                console.write_dec_u64(mapping.writable_pages as u64)?;
 
-            console.write_ascii("\nExecutable pages: ")?;
-            console.write_dec_u64(mapping.executable_pages as u64)?;
+                console.write_ascii("\nExecutable pages: ")?;
+                console.write_dec_u64(mapping.executable_pages as u64)?;
 
-            console.write_ascii(
-                "\nKernel page tables verified\n\
-                        Inactive page tables released\n",
-            )?;
+                console.write_ascii("\nKernel page tables verified\n")?;
+
+                Ok(())
+            })();
+            // Pour ce test, liberer explicitement les tables,
+            // meme si le diagnostic a echoue.
+            let mapping_cleanup = mapping::release_kernel_mapping(mapping, services);
+
+            mapping_cleanup?;
+            diagnostic?;
+
+            console.write_ascii("Kernel page tables released\n")?;
 
             Ok(())
         })();
 
-        // Libérer les pages même si l'affichage a échoué.
-        let release_result = stage::release_kernel(report, services);
+        // Le noyau reste alloue durant tout la verification
+        // Le liberer aussi en cas d'echec de celle-ci
+        let kernel_cleanup = stage::release_kernel(kernel, services);
 
         // Propager les erreurs après la tentative de libération.
-        diagnostic?;
-        release_result?;
+        verification?;
+        kernel_cleanup?;
 
-        console.write_ascii("Kernel image released after verification\n")?;
+        console.write_ascii("Kernel physical pages released\n")?;
 
         Ok(())
     })();

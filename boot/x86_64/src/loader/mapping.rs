@@ -38,7 +38,7 @@ pub(super) struct MappingReport {
     pub executable_pages: usize,
 }
 
-pub(super) fn test_kernel_mapping(
+pub(super) fn build_kernel_mapping(
     file: *mut FileProtocol,
     services: &BootServices,
     elf: &ElfHeader,
@@ -284,13 +284,31 @@ pub(super) fn test_kernel_mapping(
             executable_pages,
         })
     })();
-    // Ce test n'active pas les nouvelle tables
-    // Elles doivent etre liberees dans tout les cas.
-    let free_status = unsafe { (services.free_pages)(tables_physical, TABLE_PAGES) };
+    // En cas de succes, conserver les tables.
+    // En cas d'echec, liberer leur allocation.
+    match result {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let free_status = unsafe { (services.free_pages)(tables_physical, TABLE_PAGES) };
 
-    if free_status != EFI_SUCCESS {
-        return Err(free_status);
+            if free_status != EFI_SUCCESS {
+                return Err(free_status);
+            }
+
+            Err(error)
+        }
+    }
+}
+
+pub(super) fn release_kernel_mapping(
+    mapping: MappingReport,
+    services: &BootServices,
+) -> Result<(), EfiStatus> {
+    let status = unsafe { (services.free_pages)(mapping.pml4_physical, TABLE_PAGES) };
+
+    if status != EFI_SUCCESS {
+        return Err(status);
     }
 
-    result
+    Ok(())
 }

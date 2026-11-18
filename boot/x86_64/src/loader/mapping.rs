@@ -2,6 +2,7 @@ use core::slice;
 
 use super::{EFI_LOAD_ERROR, read_exact_at, stage::StageReport};
 
+use super::stack::{KernelStack, STACK_GUARD_VIRTUAL, STACK_PAGES, STACK_VIRTUAL_BASE};
 use crate::elf::header::ElfHeader;
 use crate::elf::program::{PROGRAM_HEADER_SIZE, PT_LOAD, ProgramHeader};
 use crate::uefi::file::FileProtocol;
@@ -36,6 +37,8 @@ pub(super) struct MappingReport {
     pub mapped_pages: usize,
     pub writable_pages: usize,
     pub executable_pages: usize,
+    pub stack_mapped_pages: usize,
+    pub stack_top_virtual: u64,
 }
 
 pub(super) fn build_kernel_mapping(
@@ -43,6 +46,7 @@ pub(super) fn build_kernel_mapping(
     services: &BootServices,
     elf: &ElfHeader,
     kernel: &StageReport,
+    stack: &KernelStack,
 ) -> Result<MappingReport, EfiStatus> {
     // Le prototype accepte une image situee dans
     // une seule region virtuelle de 2 Mio
@@ -53,6 +57,34 @@ pub(super) fn build_kernel_mapping(
     let image_size = (kernel.pages as u64)
         .checked_mul(PAGE_SIZE)
         .ok_or(EFI_LOAD_ERROR)?;
+
+    let kernel_end = KERNEL_VIRTUAL_BASE
+        .checked_add(image_size)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    if kernel_end > STACK_GUARD_VIRTUAL {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let expected_stack_top = STACK_VIRTUAL_BASE
+        .checked_add(STACK_PAGES as u64 * PAGE_SIZE)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    if stack.pages != STACK_PAGES
+        || stack.virtual_base != STACK_VIRTUAL_BASE
+        || stack.top_virtual != expected_stack_top
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // La pile doit utiliser les memes PML4, PDPT
+    // et PD que le noyau dans ce prototype
+    let stack_last_address = stack.top_virtual.checked_sub(1).ok_or(EFI_LOAD_ERROR)?;
+
+    if (stack.virtual_base >> 21) != (KERNEL_VIRTUAL_BASE >> 21)
+        || (stack_last_address >> 21) != (KERNEL_VIRTUAL_BASE >> 21)
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
 
     let virtual_end = KERNEL_VIRTUAL_BASE
         .checked_add(image_size - 1)
@@ -274,6 +306,66 @@ pub(super) fn build_kernel_mapping(
                 return Err(EFI_LOAD_ERROR);
             }
         }
+        // Mapper les huit pages de la pile
+        let stack_first_index = ((stack.virtual_base >> 12) & 0x1FF) as usize;
+
+        let guard_index = ((STACK_GUARD_VIRTUAL >> 12) & 0x1FF) as usize;
+
+        let stack_end_index = stack_first_index
+            .checked_add(stack.pages)
+            .ok_or(EFI_LOAD_ERROR)?;
+
+        if guard_index + 1 != stack_first_index || stack_end_index > TABLE_ENTRIES {
+            return Err(EFI_LOAD_ERROR);
+        }
+        // La page de garde ne doit posseder aucune PTE.
+        let guard_entry = 3 * TABLE_ENTRIES + guard_index;
+
+        if entries[guard_entry] != 0 {
+            return Err(EFI_LOAD_ERROR);
+        }
+
+        for index in 0..stack.pages {
+            let offset = (index as u64)
+                .checked_mul(PAGE_SIZE)
+                .ok_or(EFI_LOAD_ERROR)?;
+
+            let physical = stack
+                .physical_base
+                .checked_add(offset)
+                .ok_or(EFI_LOAD_ERROR)?;
+
+            if physical == 0 || physical & !ADDRESS_MASK != 0 {
+                return Err(EFI_LOAD_ERROR);
+            }
+
+            let entry_index = 3 * TABLE_ENTRIES + stack_first_index + index;
+
+            if entries[entry_index] != 0 {
+                return Err(EFI_LOAD_ERROR);
+            }
+
+            entries[entry_index] = physical | PRESENT | WRITABLE | NO_EXECUTE;
+        }
+        // Verifier que la page de garde est absente.
+        if entries[guard_entry] != 0 {
+            return Err(EFI_LOAD_ERROR);
+        }
+        // Verifier chaque entree de la pile.
+        for index in 0..stack.pages {
+            let physical = stack
+                .physical_base
+                .checked_add(index as u64 * PAGE_SIZE)
+                .ok_or(EFI_LOAD_ERROR)?;
+
+            let expected = physical | PRESENT | WRITABLE | NO_EXECUTE;
+
+            let entry_index = 3 * TABLE_ENTRIES + stack_first_index + index;
+
+            if entries[entry_index] != expected {
+                return Err(EFI_LOAD_ERROR);
+            }
+        }
 
         Ok(MappingReport {
             pml4_physical: tables_physical,
@@ -282,6 +374,8 @@ pub(super) fn build_kernel_mapping(
             mapped_pages,
             writable_pages,
             executable_pages,
+            stack_mapped_pages: stack.pages,
+            stack_top_virtual: stack.top_virtual,
         })
     })();
     // En cas de succes, conserver les tables.

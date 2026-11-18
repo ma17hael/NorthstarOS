@@ -1,5 +1,6 @@
 mod dynamic;
 mod mapping;
+mod stack;
 mod stage;
 
 use core::ffi::c_void;
@@ -22,6 +23,7 @@ const EFI_FILE_MODE_READ: u64 = 1;
 pub(crate) struct PreparedKernel {
     kernel: stage::StageReport,
     mapping: mapping::MappingReport,
+    stack: stack::KernelStack,
 }
 
 impl PreparedKernel {
@@ -30,9 +32,11 @@ impl PreparedKernel {
     // meme si la premiere libération echoue.
     pub(crate) fn release(self, services: &BootServices) -> Result<(), EfiStatus> {
         let mapping_result = mapping::release_kernel_mapping(self.mapping, services);
+        let stack_result = stack::release_stack(self.stack, services);
         let kernel_result = stage::release_kernel(self.kernel, services);
 
         mapping_result?;
+        stack_result?;
         kernel_result
     }
 }
@@ -200,16 +204,53 @@ pub fn prepare_kernel(
 
         console.write_ascii("\nStaging kernel PT_LOAD segments...\n")?;
 
-        let kernel = stage::stage_kernel(file, services, &elf)?;
-        // Construire les tables de pagination
-        // En cas d'erreur, liberer l'image du noyau.
-        let mapping = match mapping::build_kernel_mapping(file, services, &elf, &kernel) {
-            Ok(mapping) => mapping,
+        let _ = console.write_ascii("[BOOT] Loading kernel segments...\n");
+        let kernel = match stage::stage_kernel(file, services, &elf) {
+            Ok(kernel) => {
+                let _ = console.write_ascii("[BOOT] Kernel segments loaded\n");
+                kernel
+            }
             Err(status) => {
+                let _ = console.write_ascii("[ERROR] Kernel staging failed: ");
+                let _ = console.write_hex_u64(status as u64);
+                let _ = console.write_ascii("\n");
+                return Err(status);
+            }
+        };
+
+        let _ = console.write_ascii("[BOOT] Allocating kernel stack...");
+        let stack = match stack::allocate_stack(services) {
+            Ok(stack) => {
+                let _ = console.write_ascii("[BOOT] Kernel stack allocated\n");
+                stack
+            }
+            Err(status) => {
+                let _ = console.write_ascii("[ERROR] Stack allocation failed: ");
+                let _ = console.write_hex_u64(status as u64);
+                let _ = console.write_ascii("\n");
                 stage::release_kernel(kernel, services)?;
                 return Err(status);
             }
         };
+        // Construire les tables de pagination
+        // En cas d'erreur, liberer l'image du noyau.
+        let _ = console.write_ascii("[BOOT] Building kernel page tables...\n");
+        let mapping = match mapping::build_kernel_mapping(file, services, &elf, &kernel, &stack) {
+            Ok(mapping) => {
+                let _ = console.write_ascii("[BOOT] Kernel page tables built\n");
+                mapping
+            }
+            Err(status) => {
+                let _ = console.write_ascii("[ERROR] Kernel mapping failed: ");
+                let _ = console.write_hex_u64(status as u64);
+                let stack_cleanup = stack::release_stack(stack, services);
+                let kernel_cleanup = stage::release_kernel(kernel, services);
+                stack_cleanup?;
+                kernel_cleanup?;
+                return Err(status);
+            }
+        };
+
         // Les deux allocations sont maintenant actives.
         let diagnostic = (|| -> Result<(), EfiStatus> {
             console.write_ascii("\nKernel image and page tables retained\n")?;
@@ -241,20 +282,45 @@ pub fn prepare_kernel(
             console.write_ascii("\nExecutable pages: ")?;
             console.write_dec_u64(mapping.executable_pages as u64)?;
 
+            console.write_ascii("\nStack physical base: ")?;
+            console.write_hex_u64(stack.physical_base)?;
+
+            console.write_ascii("\nStack virtual base: ")?;
+            console.write_hex_u64(stack.virtual_base)?;
+
+            console.write_ascii("\nStack mapped pages: ")?;
+            console.write_dec_u64(mapping.stack_mapped_pages as u64)?;
+
+            console.write_ascii("\nFuture kernel RSP: ")?;
+            console.write_hex_u64(mapping.stack_top_virtual)?;
+
+            console.write_ascii(
+                "\nKernel stack verified\n\
+                Stack guard page verified\n",
+            )?;
+
             console.write_ascii("\nPreparedKernel initialized successfully\n")?;
 
             Ok(())
         })();
         // Nettoyer les allocations si le diagnostic echoue
         if let Err(status) = diagnostic {
-            let prepared = PreparedKernel { kernel, mapping };
+            let prepared = PreparedKernel {
+                kernel,
+                mapping,
+                stack,
+            };
 
             prepared.release(services)?;
             return Err(status);
         }
         // Transferer la propriete des allocations
         // au reste du processus de demarrage
-        Ok(PreparedKernel { kernel, mapping })
+        Ok(PreparedKernel {
+            kernel,
+            mapping,
+            stack,
+        })
     })();
     // Fermer les handles, meme en cas d'echec du parseur.
     let file_close_status = unsafe { ((*file).close)(file) };

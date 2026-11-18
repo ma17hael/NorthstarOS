@@ -15,6 +15,7 @@ const TABLE_PAGES: usize = 4;
 const MAX_KERNEL_PAGES: usize = 512;
 
 const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_8000_0000_0000;
+pub(super) const BOOT_INFO_VIRTUAL_BASE: u64 = 0xFFFF_8000_0002_0000;
 
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -405,4 +406,62 @@ pub(super) fn release_kernel_mapping(
     }
 
     Ok(())
+}
+
+pub(super) fn map_boot_info(
+    mapping: &MappingReport,
+    boot_info_physical: u64,
+) -> Result<u64, EfiStatus> {
+    // Verifier l'address physique de BootInfo.
+    if boot_info_physical == 0
+        || !boot_info_physical.is_multiple_of(PAGE_SIZE)
+        || boot_info_physical & !ADDRESS_MASK != 0
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // BootInfo doit rester dans la meme region
+    // virtuelle de 2 Mio que le noyau.
+    if (BOOT_INFO_VIRTUAL_BASE >> 21) != (mapping.virtual_base >> 21) {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // Ne pas chevaucher la pile.
+    if BOOT_INFO_VIRTUAL_BASE < mapping.stack_top_virtual {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // Nos quatre tables sont contigues :
+    // PML4, PDPT, PD puis PT.
+    let pt_physical = mapping
+        .pml4_physical
+        .checked_add(3 * PAGE_SIZE)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    let pt_address = usize::try_from(pt_physical).map_err(|_| EFI_LOAD_ERROR)?;
+    // SAFETY:
+    // Prototype EDK II/QEMU x86-64.
+    // Les pages des tables sont encore reservees
+    // et accessibles par le mapping du firmware
+    // Elles ne sont pas actives dans CR3.
+    let table = unsafe { slice::from_raw_parts_mut(pt_address as *mut u64, TABLE_ENTRIES) };
+
+    let index = ((BOOT_INFO_VIRTUAL_BASE >> 12) & 0x1FF) as usize;
+    // Refuser d'ecraser une entree existante.
+    if table[index] != 0 {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // Present, lecture seule, non executable.
+    let entry = boot_info_physical | PRESENT | NO_EXECUTE;
+
+    table[index] = entry;
+    // Verification du mapping construit.
+    if table[index] != entry {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // La page de garde doit rester inaccessible
+    let guard_index = ((STACK_GUARD_VIRTUAL >> 12) & 0x1FF) as usize;
+
+    if table[guard_index] != 0 {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    Ok(BOOT_INFO_VIRTUAL_BASE)
 }

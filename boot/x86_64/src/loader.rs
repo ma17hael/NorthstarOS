@@ -272,6 +272,29 @@ pub fn prepare_kernel(
             }
         };
 
+        let _ = console.write_ascii("[BOOT] Mapping BootInfo into kernel space...\n");
+        let boot_info_virtual = match mapping::map_boot_info(&mapping, boot_info.physical_base) {
+            Ok(address) => address,
+            Err(status) => {
+                let _ = console.write_ascii("[ERROR] BootInfo mapping failed:");
+                let _ = console.write_hex_u64(status as u64);
+                let _ = console.write_ascii("\n");
+                // Les quatres ressources sont deja allouees.
+                // Les liberer avant de retourner une erreur.
+                let prepared = PreparedKernel {
+                    kernel,
+                    mapping,
+                    stack,
+                    boot_info,
+                };
+
+                prepared.release(services)?;
+
+                return Err(status);
+            }
+        };
+        let _ = console.write_ascii("[BOOT] BootInfo virtual mapping verified\n");
+
         // Les deux allocations sont maintenant actives.
         let diagnostic = (|| -> Result<(), EfiStatus> {
             console.write_ascii("\nKernel image and page tables retained\n")?;
@@ -322,6 +345,11 @@ pub fn prepare_kernel(
 
             console.write_ascii("\nBootInfo physical address: ")?;
             console.write_hex_u64(boot_info.physical_base)?;
+
+            console.write_ascii("\nBootInfo virtual address: ")?;
+            console.write_hex_u64(boot_info_virtual)?;
+
+            console.write_ascii("\nBootInfo mapping: read-only, NX\n")?;
 
             console.write_ascii("\nBootInfo version: ")?;
             console.write_dec_u64(boot_info.value.version as u64)?;

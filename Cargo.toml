@@ -2,7 +2,8 @@
 resolver = "3"
 members = [
     "boot/x86_64",
-    "kernel"
+    "kernel",
+    "shared/boot-protocol"
 ]
 
 [profile.dev]

@@ -8,3 +8,4 @@ name = "northstar-kernel"
 path = "src/main.rs"
 
 [dependencies]
+northstar-boot-protocol = { path = "../shared/boot-protocol" }

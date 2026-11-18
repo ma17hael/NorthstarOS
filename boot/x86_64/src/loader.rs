@@ -1,3 +1,4 @@
+mod boot_info;
 mod dynamic;
 mod mapping;
 mod stack;
@@ -24,6 +25,7 @@ pub(crate) struct PreparedKernel {
     kernel: stage::StageReport,
     mapping: mapping::MappingReport,
     stack: stack::KernelStack,
+    boot_info: boot_info::BootInfoAllocation,
 }
 
 impl PreparedKernel {
@@ -31,10 +33,13 @@ impl PreparedKernel {
     // Les deux allocations doivent être traitees,
     // meme si la premiere libération echoue.
     pub(crate) fn release(self, services: &BootServices) -> Result<(), EfiStatus> {
+        let boot_info_result = boot_info::release_boot_info(self.boot_info, services);
         let mapping_result = mapping::release_kernel_mapping(self.mapping, services);
         let stack_result = stack::release_stack(self.stack, services);
         let kernel_result = stage::release_kernel(self.kernel, services);
-
+        // Toutes les liberations sont tentees avant
+        // de retourner une eventuelle erreur.
+        boot_info_result?;
         mapping_result?;
         stack_result?;
         kernel_result
@@ -218,7 +223,7 @@ pub fn prepare_kernel(
             }
         };
 
-        let _ = console.write_ascii("[BOOT] Allocating kernel stack...");
+        let _ = console.write_ascii("[BOOT] Allocating kernel stack...\n");
         let stack = match stack::allocate_stack(services) {
             Ok(stack) => {
                 let _ = console.write_ascii("[BOOT] Kernel stack allocated\n");
@@ -247,6 +252,22 @@ pub fn prepare_kernel(
                 let kernel_cleanup = stage::release_kernel(kernel, services);
                 stack_cleanup?;
                 kernel_cleanup?;
+                return Err(status);
+            }
+        };
+
+        let _ = console.write_ascii("[BOOT] Preparing BootInfo...\n");
+        let boot_info = match boot_info::allocate_boot_info(services, &kernel, &mapping, &stack) {
+            Ok(boot_info) => boot_info,
+            Err(status) => {
+                let mapping_cleanup = mapping::release_kernel_mapping(mapping, services);
+                let stack_cleanup = stack::release_stack(stack, services);
+                let kernel_cleanup = stage::release_kernel(kernel, services);
+
+                mapping_cleanup?;
+                stack_cleanup?;
+                kernel_cleanup?;
+
                 return Err(status);
             }
         };
@@ -299,6 +320,25 @@ pub fn prepare_kernel(
                 Stack guard page verified\n",
             )?;
 
+            console.write_ascii("\nBootInfo physical address: ")?;
+            console.write_hex_u64(boot_info.physical_base)?;
+
+            console.write_ascii("\nBootInfo version: ")?;
+            console.write_dec_u64(boot_info.value.version as u64)?;
+
+            console.write_ascii("\nBootInfo size: ")?;
+            console.write_dec_u64(boot_info.value.size as u64)?;
+            console.write_ascii(" bytes\n")?;
+
+            if !boot_info.value.validate() || boot_info.value.has_memory_map() {
+                return Err(EFI_LOAD_ERROR);
+            }
+
+            console.write_ascii(
+                "BootInfo structure validated\n\
+                MemoryMapInfo pending final handoff\n",
+            )?;
+
             console.write_ascii("\nPreparedKernel initialized successfully\n")?;
 
             Ok(())
@@ -309,6 +349,7 @@ pub fn prepare_kernel(
                 kernel,
                 mapping,
                 stack,
+                boot_info,
             };
 
             prepared.release(services)?;
@@ -320,6 +361,7 @@ pub fn prepare_kernel(
             kernel,
             mapping,
             stack,
+            boot_info,
         })
     })();
     // Fermer les handles, meme en cas d'echec du parseur.

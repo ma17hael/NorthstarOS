@@ -6,3 +6,6 @@ edition = "2024"
 [[bin]]
 name = "northstar-boot"
 path = "src/main.rs"
+
+[dependencies]
+northstar-boot-protocol = { path = "../../shared/boot-protocol" }

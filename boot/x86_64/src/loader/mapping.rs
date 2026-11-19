@@ -1,5 +1,6 @@
 use core::slice;
 
+use super::memory_map::{MEMORY_MAP_VIRTUAL_BASE, ReservedMemoryMap};
 use super::{EFI_LOAD_ERROR, read_exact_at, stage::StageReport};
 
 use super::stack::{KernelStack, STACK_GUARD_VIRTUAL, STACK_PAGES, STACK_VIRTUAL_BASE};
@@ -464,4 +465,92 @@ pub(super) fn map_boot_info(
     }
 
     Ok(BOOT_INFO_VIRTUAL_BASE)
+}
+
+pub(super) fn map_memory_map(
+    mapping: &MappingReport,
+    reserved: &ReservedMemoryMap,
+) -> Result<u64, EfiStatus> {
+    if reserved.pages == 0
+        || reserved.pages > 64
+        || reserved.physical_base == 0
+        || !reserved.physical_base.is_multiple_of(PAGE_SIZE)
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let length = (reserved.pages as u64)
+        .checked_mul(PAGE_SIZE)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    let virtual_end = MEMORY_MAP_VIRTUAL_BASE
+        .checked_add(length - 1)
+        .ok_or(EFI_LOAD_ERROR)?;
+    // Toute la carte doit rester dans la meme
+    // region de 2 Mio que le noyau.
+    if (MEMORY_MAP_VIRTUAL_BASE >> 21) != (mapping.virtual_base >> 21)
+        || (virtual_end >> 21) != (mapping.virtual_base >> 21)
+        || MEMORY_MAP_VIRTUAL_BASE < BOOT_INFO_VIRTUAL_BASE + PAGE_SIZE
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let pt_physical = mapping
+        .pml4_physical
+        .checked_add(3 * PAGE_SIZE)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    let pt_address = usize::try_from(pt_physical).map_err(|_| EFI_LOAD_ERROR)?;
+    // SAFETY: les tables existent et sont encore
+    // accessible dans le mapping UEFI courant
+    let table = unsafe { slice::from_raw_parts_mut(pt_address as *mut u64, TABLE_ENTRIES) };
+
+    let first_index = ((MEMORY_MAP_VIRTUAL_BASE >> 12) & 0x1FF) as usize;
+
+    let end_index = first_index
+        .checked_add(reserved.pages)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    if end_index > TABLE_ENTRIES {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // Verification avant toute modification
+    for index in 0..reserved.pages {
+        let offset = (index as u64)
+            .checked_mul(PAGE_SIZE)
+            .ok_or(EFI_LOAD_ERROR)?;
+
+        let physical = reserved
+            .physical_base
+            .checked_add(offset)
+            .ok_or(EFI_LOAD_ERROR)?;
+
+        if physical & !ADDRESS_MASK != 0 || table[first_index + index] != 0 {
+            return Err(EFI_LOAD_ERROR);
+        }
+    }
+    // Installer les PTE lecture seule et NX
+    for index in 0..reserved.pages {
+        let physical = reserved.physical_base + index as u64 * PAGE_SIZE;
+
+        table[first_index + index] = physical | PRESENT | NO_EXECUTE;
+    }
+    // Verifier les entrees installees.
+    for index in 0..reserved.pages {
+        let physical = reserved.physical_base + index as u64 * PAGE_SIZE;
+
+        let expected = physical | PRESENT | NO_EXECUTE;
+
+        if table[first_index + index] != expected {
+            return Err(EFI_LOAD_ERROR);
+        }
+    }
+    // La page de garde doit rester absente.
+    let guard_index = ((STACK_GUARD_VIRTUAL >> 12) & 0x1FF) as usize;
+
+    if table[guard_index] != 0 {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    Ok(MEMORY_MAP_VIRTUAL_BASE)
 }

@@ -1,6 +1,7 @@
 mod boot_info;
 mod dynamic;
 mod mapping;
+mod memory_map;
 mod stack;
 mod stage;
 
@@ -26,6 +27,7 @@ pub(crate) struct PreparedKernel {
     mapping: mapping::MappingReport,
     stack: stack::KernelStack,
     boot_info: boot_info::BootInfoAllocation,
+    memory_map: Option<memory_map::ReservedMemoryMap>,
 }
 
 impl PreparedKernel {
@@ -33,12 +35,17 @@ impl PreparedKernel {
     // Les deux allocations doivent être traitees,
     // meme si la premiere libération echoue.
     pub(crate) fn release(self, services: &BootServices) -> Result<(), EfiStatus> {
+        let memory_map_result = match self.memory_map {
+            Some(reserved) => memory_map::release_memory_map(reserved, services),
+            None => Ok(()),
+        };
         let boot_info_result = boot_info::release_boot_info(self.boot_info, services);
         let mapping_result = mapping::release_kernel_mapping(self.mapping, services);
         let stack_result = stack::release_stack(self.stack, services);
         let kernel_result = stage::release_kernel(self.kernel, services);
         // Toutes les liberations sont tentees avant
         // de retourner une eventuelle erreur.
+        memory_map_result?;
         boot_info_result?;
         mapping_result?;
         stack_result?;
@@ -286,6 +293,7 @@ pub fn prepare_kernel(
                     mapping,
                     stack,
                     boot_info,
+                    memory_map: None,
                 };
 
                 prepared.release(services)?;
@@ -294,6 +302,56 @@ pub fn prepare_kernel(
             }
         };
         let _ = console.write_ascii("[BOOT] BootInfo virtual mapping verified\n");
+
+        let _ = console.write_ascii("[BOOT] Reserving persistent UEFI memory map...\n");
+        let memory_map = match memory_map::reserve_memory_map(services) {
+            Ok(reserved) => reserved,
+            Err(status) => {
+                PreparedKernel {
+                    kernel,
+                    mapping,
+                    stack,
+                    boot_info,
+                    memory_map: None,
+                }
+                .release(services)?;
+
+                return Err(status);
+            }
+        };
+        let _ = console.write_ascii("[BOOT] Mapping UEFI memory map...\n");
+        let memory_map_virtual = match mapping::map_memory_map(&mapping, &memory_map) {
+            Ok(address) => address,
+            Err(status) => {
+                PreparedKernel {
+                    kernel,
+                    mapping,
+                    stack,
+                    boot_info,
+                    memory_map: Some(memory_map),
+                }
+                .release(services)?;
+
+                return Err(status);
+            }
+        };
+        // Capture de verification : elle n'est PAS definitive.
+        let memory_map_preview = match memory_map::capture_memory_map(services, &memory_map) {
+            Ok(snapshot) => snapshot,
+            Err(status) => {
+                PreparedKernel {
+                    kernel,
+                    mapping,
+                    stack,
+                    boot_info,
+                    memory_map: Some(memory_map),
+                }
+                .release(services)?;
+
+                return Err(status);
+            }
+        };
+        let _ = console.write_ascii("[BOOT] UEFI memory map buffer verified\n");
 
         // Les deux allocations sont maintenant actives.
         let diagnostic = (|| -> Result<(), EfiStatus> {
@@ -362,9 +420,45 @@ pub fn prepare_kernel(
                 return Err(EFI_LOAD_ERROR);
             }
 
+            console.write_ascii("BootInfo structure validated\n")?;
+
+            console.write_ascii("\nUEFI memory map physical base: ")?;
+            console.write_hex_u64(memory_map.physical_base)?;
+
+            console.write_ascii("\nUEFI memory map virtual base: ")?;
+            console.write_hex_u64(memory_map_virtual)?;
+
+            console.write_ascii("\nReserved memory map pages: ")?;
+            console.write_dec_u64(memory_map.pages as u64)?;
+
+            console.write_ascii("\nMemory map capacity: ")?;
+            console.write_dec_u64(memory_map.capacity_bytes as u64)?;
+            console.write_ascii(" bytes")?;
+
+            console.write_ascii("\nSnapshot size: ")?;
+            console.write_dec_u64(memory_map_preview.size_bytes as u64)?;
+
+            console.write_ascii("\nDescriptor size: ")?;
+            console.write_dec_u64(memory_map_preview.descriptor_size as u64)?;
+
+            console.write_ascii("\nDescriptor version: ")?;
+            console.write_dec_u64(memory_map_preview.descriptor_version as u64)?;
+
+            console.write_ascii("\nSnapshot MapKey (temporary): ")?;
+            console.write_hex_u64(memory_map_preview.map_key as u64)?;
+
+            let descriptors = memory_map_preview.size_bytes / memory_map_preview.descriptor_size;
+
+            console.write_ascii("\nMemory descriptors: ")?;
+            console.write_dec_u64(descriptors as u64)?;
+
+            if boot_info.value.has_memory_map() {
+                return Err(EFI_LOAD_ERROR);
+            }
+
             console.write_ascii(
-                "BootInfo structure validated\n\
-                MemoryMapInfo pending final handoff\n",
+                "\nMemory map buffer prepared\n\
+                Final memory map handoff pending\n",
             )?;
 
             console.write_ascii("\nPreparedKernel initialized successfully\n")?;
@@ -378,6 +472,7 @@ pub fn prepare_kernel(
                 mapping,
                 stack,
                 boot_info,
+                memory_map: Some(memory_map),
             };
 
             prepared.release(services)?;
@@ -390,6 +485,7 @@ pub fn prepare_kernel(
             mapping,
             stack,
             boot_info,
+            memory_map: Some(memory_map),
         })
     })();
     // Fermer les handles, meme en cas d'echec du parseur.

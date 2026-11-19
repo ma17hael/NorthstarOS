@@ -37,6 +37,7 @@ pub struct PagingInfo {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryMapInfo {
     pub physical_base: u64,
+    pub virtual_base: u64,
     pub size_bytes: u64,
     pub descriptor_size: u64,
     pub descriptor_version: u32,
@@ -69,6 +70,7 @@ impl BootInfo {
             paging,
             memory_map: MemoryMapInfo {
                 physical_base: 0,
+                virtual_base: 0,
                 size_bytes: 0,
                 descriptor_size: 0,
                 descriptor_version: 0,

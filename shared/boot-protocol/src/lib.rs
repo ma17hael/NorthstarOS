@@ -7,6 +7,8 @@ pub const BOOT_INFO_VERSION: u32 = 1;
 // La carte memoire ne sera valide qu'apres
 // une acquisition finale avant ExitBootService
 pub const FLAG_MEMORY_MAP_VALID: u64 = 1 << 0;
+pub const KERNEL_STACK_ALIGNEMENT: u64 = 16;
+pub const BOOT_INFO_VIRTUAL_BASE: u64 = 0xFFFF_8000_0002_0000;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,3 +95,6 @@ impl BootInfo {
         self.flags & FLAG_MEMORY_MAP_VALID != 0
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+pub type KernelEntry = unsafe extern "sysv64" fn(boot_info: *const BootInfo) -> !;

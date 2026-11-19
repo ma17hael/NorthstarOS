@@ -5,7 +5,10 @@ use core::arch::asm;
 use core::hint::spin_loop;
 use core::panic::PanicInfo;
 
+use northstar_boot_protocol::{BootInfo, KernelEntry};
+
 const COM1: u16 = 0x3F8;
+const _: KernelEntry = _start;
 
 unsafe fn serial_write_byte(byte: u8) {
     // SAFETY: necessite un port serie COM1 disponible
@@ -28,8 +31,19 @@ fn serial_write(text: &str) {
     }
 }
 
+/// # Safety
+///
+/// L'appelant doit garantir que :
+/// - Le processeur est en Long Mode avec les privileges Ring 0.
+/// - Les services de demarrage UEFI ont ete quittes.
+/// - Les tables de pagination du noyau sont actives.
+/// - La pile du noyau est mappee et respecte l'ABI System V AMD64.
+/// - Le pointeur BootInfo est valide, aligne et accessible.
+/// - Les interruptions masquables sont desactivees.
+/// - Le Direction Flag est desactive.
+/// - Le port serie COM1 est initialise et accessible.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+pub unsafe extern "sysv64" fn _start(_boot_info: *const BootInfo) -> ! {
     serial_write("Northstar Kernel initialized\n");
 
     loop {

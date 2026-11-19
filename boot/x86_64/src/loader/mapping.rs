@@ -1,5 +1,7 @@
 use core::slice;
 
+use northstar_boot_protocol::BOOT_INFO_VIRTUAL_BASE;
+
 use super::memory_map::{MEMORY_MAP_VIRTUAL_BASE, ReservedMemoryMap};
 use super::{EFI_LOAD_ERROR, read_exact_at, stage::StageReport};
 
@@ -16,7 +18,6 @@ const TABLE_PAGES: usize = 4;
 const MAX_KERNEL_PAGES: usize = 512;
 
 const KERNEL_VIRTUAL_BASE: u64 = 0xFFFF_8000_0000_0000;
-pub(super) const BOOT_INFO_VIRTUAL_BASE: u64 = 0xFFFF_8000_0002_0000;
 
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 

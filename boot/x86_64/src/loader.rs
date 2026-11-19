@@ -1,5 +1,6 @@
 mod boot_info;
 mod dynamic;
+mod handoff;
 mod mapping;
 mod memory_map;
 mod stack;
@@ -460,6 +461,33 @@ pub fn prepare_kernel(
                 "\nMemory map buffer prepared\n\
                 Final memory map handoff pending\n",
             )?;
+
+            console.write_ascii("\nPreparing kernel entry ABI...\n")?;
+
+            handoff::verify_entry_abi(&mapping, &boot_info, boot_info_virtual)?;
+
+            console.write_ascii(
+                "Kernel calling convention: System V AMD64\n\
+                Kernel entry register: RIP\n\
+                BootInfo argument register: RDI\n\
+                Kernel stack alignment verified\n\
+                System V ABI probe successfully\n\
+                Kernel entry ABI verified\n",
+            )?;
+
+            console.write_ascii("Future RIP: ")?;
+            console.write_hex_u64(mapping.entry_virtual)?;
+
+            console.write_ascii("\nFuture RDI: ")?;
+            console.write_hex_u64(boot_info_virtual)?;
+
+            console.write_ascii("\nFuture RSP before CALL: ")?;
+            console.write_hex_u64(mapping.stack_top_virtual)?;
+
+            console.write_ascii("\nFuture RSP at kernel entry: ")?;
+            console.write_hex_u64(mapping.stack_top_virtual - 8)?;
+
+            console.write_ascii("\n")?;
 
             console.write_ascii("\nPreparedKernel initialized successfully\n")?;
 

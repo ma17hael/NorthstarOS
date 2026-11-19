@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod arch;
 mod boot;
 mod console;
 mod elf;

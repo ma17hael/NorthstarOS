@@ -1,3 +1,4 @@
+use crate::arch::x86_64;
 use crate::console::Console;
 use crate::loader;
 use crate::memory;
@@ -23,6 +24,23 @@ pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus
             Architecture: x86_64\n\
             UEFI initialized successfully\n\n",
         )?;
+
+        console.write_ascii("\nInspecting x86_64 processor...\n")?;
+        // SAFETY:
+        // Le bootloader UEFI x86_64 s'execute
+        // dans un environment privilegie.
+        let cpu = match unsafe { x86_64::inspect_cpu() } {
+            Ok(cpu) => cpu,
+            Err(status) => {
+                let _ = console.write_ascii("ERROR: CPU inspection failed\n");
+                return Err(status);
+            }
+        };
+
+        x86_64::report_cpu(&mut console, &cpu)?;
+
+        console.write_ascii("CPU inspection completed\n\n")?;
+
         // Validation du noyau ELF64.
         console.write_ascii("Searching for Northstar Kernel...\n")?;
 

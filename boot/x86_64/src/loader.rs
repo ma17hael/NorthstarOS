@@ -53,6 +53,19 @@ impl PreparedKernel {
         stack_result?;
         kernel_result
     }
+
+    pub(crate) fn exit_boot_services_test(
+        mut self,
+        image_handle: EfiHandle,
+        services: &BootServices,
+    ) -> Result<(), EfiStatus> {
+        let Some(reserved) = self.memory_map.as_ref() else {
+            self.release(services)?;
+            return Err(EFI_LOAD_ERROR);
+        };
+
+        handoff::exit_boot_services_test(image_handle, services, &mut self.boot_info, reserved)
+    }
 }
 
 pub fn prepare_kernel(

@@ -8,6 +8,8 @@ use crate::uefi::EfiHandle;
 use crate::uefi::table::SystemTable;
 use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiStatus};
 
+const TEST_EXIT_BOOT_SERVICES: bool = true;
+
 pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus {
     serial::init();
     serial::write_ascii("[SERIAL] Northstar Boot logging initialized\n");
@@ -147,12 +149,20 @@ pub fn run(image_handle: EfiHandle, system_table: *mut SystemTable) -> EfiStatus
             // PreparedKernel conserve ses allocations.
             Ok(())
         })();
-        // Liberer le noyau et ses tables de pagination,
-        // même si un diagnostic a echoue.
-        let released_result = prepared.release(services);
-        // Verifier la liberation et les diagnostics.
-        released_result?;
-        continuation?;
+        // En cas d'echec des diagnostics, nous sommes
+        // encore sous UEFI et pouvons liberer les pages.
+        if let Err(status) = continuation {
+            prepared.release(services)?;
+            return Err(status);
+        }
+
+        if TEST_EXIT_BOOT_SERVICES {
+            let _ = console.write_ascii("\nPreparing to exit UEFI Boot Services...\n");
+
+            return prepared.exit_boot_services_test(image_handle, services);
+        }
+        // Ancien mode de diagnotic
+        prepared.release(services)?;
 
         console.write_ascii("\nPreparedKernel allocations released\n")?;
 

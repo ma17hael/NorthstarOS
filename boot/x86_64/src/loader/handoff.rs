@@ -1,12 +1,20 @@
+use core::arch::asm;
 use core::hint::black_box;
 
 use northstar_boot_protocol::{
     BOOT_INFO_MAGIC, BOOT_INFO_VIRTUAL_BASE, BootInfo, KERNEL_STACK_ALIGNEMENT,
 };
 
+use super::boot_info;
+use super::memory_map::{self, ReservedMemoryMap};
 use super::{EFI_LOAD_ERROR, boot_info::BootInfoAllocation, mapping::MappingReport};
 
-use crate::uefi::types::EfiStatus;
+use crate::serial;
+use crate::uefi::EfiHandle;
+use crate::uefi::services::BootServices;
+use crate::uefi::types::{EFI_INVALID_PARAMETER, EFI_SUCCESS, EfiStatus};
+
+const MAX_EXIT_ATTEMPTS: usize = 4;
 
 #[inline(never)]
 unsafe extern "sysv64" fn probe_entry(boot_info: *const BootInfo) -> u64 {
@@ -56,4 +64,98 @@ pub(super) fn verify_entry_abi(
     }
 
     Ok(())
+}
+
+fn halt_forever() -> ! {
+    // SAFETY:
+    // Le bootloader s'execute en Ring 0.
+    // Cette fonction ne retourne jamais.
+    unsafe {
+        asm!("cli", "2:", "hlt", "jmp 2b", options(noreturn, nostack));
+    }
+}
+
+fn serial_write_hex(value: u64) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut buffer = [b'0'; 18];
+
+    buffer[1] = b'x';
+
+    for index in 0..16 {
+        let shift = (15 - index) * 4;
+        let digit = ((value >> shift) & 0xF) as usize;
+
+        buffer[index + 2] = HEX[digit];
+    }
+
+    if let Ok(text) = core::str::from_utf8(&buffer) {
+        serial::write_ascii(text);
+    }
+}
+
+fn fatal_handoff(message: &str, status: EfiStatus) -> ! {
+    serial::write_ascii(message);
+    serial_write_hex(status as u64);
+    serial::write_ascii("\n");
+
+    halt_forever()
+}
+
+pub(super) fn exit_boot_services_test(
+    image_handle: EfiHandle,
+    services: &BootServices,
+    allocation: &mut BootInfoAllocation,
+    reserved: &ReservedMemoryMap,
+) -> ! {
+    serial::write_ascii("[HANDOFF] Entering final UEFI handoff\n");
+
+    let exit_boot_services = services.exit_boot_services;
+
+    for _ in 0..MAX_EXIT_ATTEMPTS {
+        // Capturer la carte sans nouvelle allocation.
+        let snapshot = match memory_map::capture_memory_map(services, reserved) {
+            Ok(snapshot) => snapshot,
+            Err(status) => fatal_handoff("[FATAL] Final memory map failed: ", status),
+        };
+        // Aucun appel UEFI entre GetMemoryMap
+        // et ExitBootServices.
+        let status = unsafe { exit_boot_services(image_handle, snapshot.map_key) };
+
+        if status == EFI_SUCCESS {
+            serial::write_ascii("[HANDOFF] ExitBootServices successful\n");
+
+            // Ne plus utiliser services à partir d'ici.
+            if let Err(status) =
+                boot_info::publish_final_memory_map(allocation, reserved, &snapshot)
+            {
+                fatal_handoff("[FATAL] BootInfo publication failed: ", status);
+            }
+
+            serial::write_ascii(
+                "[HANDOFF] Final memory map published\n\
+            [HANDOFF] BootInfo memory map valid\n",
+            );
+
+            serial::write_ascii("[HANDOFF] Memory map address: ");
+            serial_write_hex(allocation.value.memory_map.virtual_base);
+
+            serial::write_ascii(
+                "\n[HANDOFF] UEFI handoff test successful\n\
+            [HANDOFF] CPU halted before CR3 switch\n",
+            );
+
+            halt_forever();
+        }
+
+        if status != EFI_INVALID_PARAMETER {
+            fatal_handoff("[FATAL] ExitBootServices failed: ", status)
+        }
+
+        serial::write_ascii("[HANDOFF] MapKey rejected, retrying\n");
+    }
+    fatal_handoff(
+        "[FATAL] ExitBootServices retry limit reached: ",
+        EFI_INVALID_PARAMETER,
+    );
 }

@@ -1,8 +1,11 @@
 use core::mem::size_of;
 use core::ptr;
 
-use northstar_boot_protocol::{BootInfo, KernelInfo, PagingInfo, StackInfo};
+use northstar_boot_protocol::{
+    BootInfo, FLAG_MEMORY_MAP_VALID, KernelInfo, MemoryMapInfo, PagingInfo, StackInfo,
+};
 
+use super::memory_map::{MEMORY_MAP_VIRTUAL_BASE, MemoryMapSnapshot, ReservedMemoryMap};
 use super::{
     EFI_LOAD_ERROR,
     mapping::MappingReport,
@@ -53,7 +56,7 @@ pub(super) fn allocate_boot_info(
             physical_base: kernel.physical_base,
             virtual_base: mapping.virtual_base,
             image_size: kernel_size,
-            entry_virtual: mapping.virtual_base,
+            entry_virtual: mapping.entry_virtual,
         },
         StackInfo {
             physical_base: stack.physical_base,
@@ -137,6 +140,57 @@ pub(super) fn release_boot_info(
     if status != EFI_SUCCESS {
         return Err(status);
     }
+
+    Ok(())
+}
+
+pub(super) fn publish_final_memory_map(
+    allocation: &mut BootInfoAllocation,
+    reserved: &ReservedMemoryMap,
+    snapshot: &MemoryMapSnapshot,
+) -> Result<(), EfiStatus> {
+    if snapshot.size_bytes == 0
+        || snapshot.size_bytes > reserved.capacity_bytes
+        || snapshot.descriptor_size < 40
+        || !snapshot.size_bytes.is_multiple_of(snapshot.descriptor_size)
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let mut value = allocation.value;
+
+    value.memory_map = MemoryMapInfo {
+        physical_base: reserved.physical_base,
+        virtual_base: MEMORY_MAP_VIRTUAL_BASE,
+        size_bytes: snapshot.size_bytes as u64,
+        descriptor_size: snapshot.descriptor_size as u64,
+        descriptor_version: snapshot.descriptor_version,
+        reserved: 0,
+    };
+
+    value.flags |= FLAG_MEMORY_MAP_VALID;
+
+    if !value.validate() || !value.has_memory_map() {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let address = usize::try_from(allocation.physical_base).map_err(|_| EFI_LOAD_ERROR)?;
+
+    let destination = address as *mut BootInfo;
+    // SAFETY:
+    // La page BootInfo est toujours reservee.
+    // le mapping firmware reste actif dans CR3.
+    unsafe {
+        ptr::write(destination, value);
+    }
+
+    let stored = unsafe { ptr::read(destination) };
+
+    if stored != value {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    allocation.value = stored;
 
     Ok(())
 }

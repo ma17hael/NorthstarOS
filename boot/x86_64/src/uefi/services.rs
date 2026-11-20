@@ -53,4 +53,18 @@ pub struct BootServices {
         protocol: *const Guid,
         interface: *mut *mut c_void,
     ) -> EfiStatus,
+    // Protocol Handler Services
+    _reserved: *mut c_void,
+    _register_protocol_notify: usize,
+    _locate_handle: usize,
+    _locate_device_path: usize,
+    _install_configuration_table: usize,
+    // Image Services
+    _load_image: usize,
+    _start_image: usize,
+    _exit: usize,
+    _unload_image: usize,
+
+    pub exit_boot_services:
+        unsafe extern "efiapi" fn(image_handle: EfiHandle, map_key: usize) -> EfiStatus,
 }

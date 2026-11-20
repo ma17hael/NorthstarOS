@@ -9,6 +9,7 @@ mod stage;
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
+use crate::arch::x86_64;
 use crate::console::Console;
 use crate::elf::{ElfHeader, PT_LOAD, ProgramHeader};
 use crate::uefi::file::{
@@ -248,7 +249,8 @@ pub fn prepare_kernel(
         // Construire les tables de pagination
         // En cas d'erreur, liberer l'image du noyau.
         let _ = console.write_ascii("[BOOT] Building kernel page tables...\n");
-        let mapping = match mapping::build_kernel_mapping(file, services, &elf, &kernel, &stack) {
+        let mut mapping = match mapping::build_kernel_mapping(file, services, &elf, &kernel, &stack)
+        {
             Ok(mapping) => {
                 let _ = console.write_ascii("[BOOT] Kernel page tables built\n");
                 mapping
@@ -488,6 +490,35 @@ pub fn prepare_kernel(
             console.write_hex_u64(mapping.stack_top_virtual - 8)?;
 
             console.write_ascii("\n")?;
+
+            console.write_ascii("\nPreparing transition mapping...\n")?;
+            // SAFETY:
+            // Le bootloader s'execute en Ring 0
+            // dans le mapping actif du firmware
+            let cpu = unsafe { x86_64::inspect_cpu() }?;
+
+            mapping::map_transition(&mut mapping, services, &cpu)?;
+
+            let transition = mapping.transition.as_ref().ok_or(EFI_LOAD_ERROR)?;
+
+            console.write_ascii("Transition physical address: ")?;
+            console.write_hex_u64(transition.code_address)?;
+
+            console.write_ascii("\nTransition virtual address: ")?;
+            console.write_hex_u64(transition.code_address)?;
+
+            console.write_ascii("\nTransition tables physical base: ")?;
+            console.write_hex_u64(transition.tables_physical)?;
+
+            console.write_ascii(
+                "\nTransition mapped pages: 1\n\
+                Additional paging tables: 3\n\
+                Total paging tables: 7\n\
+                Transition permissions: read-only, executable\n\
+                Physical address width verified\n\
+                Firmware identity mapping verified\n\
+                Transition identity mapping verified\n",
+            )?;
 
             console.write_ascii("\nPreparedKernel initialized successfully\n")?;
 

@@ -214,3 +214,60 @@ pub(crate) fn report_cpu(console: &mut Console, cpu: &CpuState) -> Result<(), Ef
 
     Ok(())
 }
+
+/// Verifie qu'une adresse est actuellement mappee
+/// en identite et executable.
+///
+/// # Safety
+///
+/// Les tables physiques du firmware doivent etre
+/// accessibles dans le mapping UEFI courant.
+pub(crate) unsafe fn verify_identity_executable(cpu: &CpuState, address: u64) -> bool {
+    const PRESENT: u64 = 1 << 0;
+    const HUGE_PAGE: u64 = 1 << 7;
+    const NO_EXECUTE: u64 = 1 << 63;
+
+    if !cpu.validate() || address >= (1u64 << 47) {
+        return false;
+    }
+
+    let mask = cpu.physical_address_mask();
+
+    let mut table_physical = cpu.cr3 & mask;
+    // PML4 -> PDPT -> PD -> PT
+    for shift in [39u32, 30, 21, 12] {
+        if table_physical == 0 {
+            return false;
+        }
+
+        let index = ((address >> shift) & 0x1FF) as usize;
+
+        let table = table_physical as *const u64;
+        // SAFETY:
+        // Les tables physiques du firmware sont
+        // accessibles dans notre prototype QEMU.
+        let entry = unsafe { core::ptr::read_volatile(table.add(index)) };
+
+        if entry & PRESENT == 0 || entry & NO_EXECUTE != 0 {
+            return false;
+        }
+        // Pages de 1 Gio ou 2 Mio
+        if (shift == 30 || shift == 21) && entry & HUGE_PAGE != 0 {
+            let offset_mask = (1u64 << shift) - 1;
+
+            let physical = (entry & mask & !offset_mask) | (address & offset_mask);
+
+            return physical == address;
+        }
+        // Page standard de 4 Kio.
+        if shift == 12 {
+            let physical = (entry & mask) | (address & 0xFFF);
+
+            return physical == address;
+        }
+
+        table_physical = entry & mask;
+    }
+
+    false
+}

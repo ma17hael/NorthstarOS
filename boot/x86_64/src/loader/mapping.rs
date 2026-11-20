@@ -6,6 +6,8 @@ use super::memory_map::{MEMORY_MAP_VIRTUAL_BASE, ReservedMemoryMap};
 use super::{EFI_LOAD_ERROR, read_exact_at, stage::StageReport};
 
 use super::stack::{KernelStack, STACK_GUARD_VIRTUAL, STACK_PAGES, STACK_VIRTUAL_BASE};
+use crate::arch::transition;
+use crate::arch::x86_64::{self, CpuState};
 use crate::elf::header::ElfHeader;
 use crate::elf::program::{PROGRAM_HEADER_SIZE, PT_LOAD, ProgramHeader};
 use crate::uefi::file::FileProtocol;
@@ -33,6 +35,8 @@ const PAGE_PRESENT: u8 = 1;
 const PAGE_WRITABLE: u8 = 2;
 const PAGE_EXECUTABLE: u8 = 4;
 
+const TRANSITION_TABLE_PAGES: usize = 3;
+
 pub(super) struct MappingReport {
     pub pml4_physical: u64,
     pub virtual_base: u64,
@@ -42,6 +46,12 @@ pub(super) struct MappingReport {
     pub executable_pages: usize,
     pub stack_mapped_pages: usize,
     pub stack_top_virtual: u64,
+    pub transition: Option<TransitionMapping>,
+}
+
+pub(super) struct TransitionMapping {
+    pub code_address: u64,
+    pub tables_physical: u64,
 }
 
 pub(super) fn build_kernel_mapping(
@@ -379,6 +389,7 @@ pub(super) fn build_kernel_mapping(
             executable_pages,
             stack_mapped_pages: stack.pages,
             stack_top_virtual: stack.top_virtual,
+            transition: None,
         })
     })();
     // En cas de succes, conserver les tables.
@@ -401,10 +412,19 @@ pub(super) fn release_kernel_mapping(
     mapping: MappingReport,
     services: &BootServices,
 ) -> Result<(), EfiStatus> {
-    let status = unsafe { (services.free_pages)(mapping.pml4_physical, TABLE_PAGES) };
+    let transition_status = match mapping.transition {
+        Some(transition) => unsafe {
+            (services.free_pages)(transition.tables_physical, TRANSITION_TABLE_PAGES)
+        },
+        None => EFI_SUCCESS,
+    };
+    let kernel_status = unsafe { (services.free_pages)(mapping.pml4_physical, TABLE_PAGES) };
 
-    if status != EFI_SUCCESS {
-        return Err(status);
+    if transition_status != EFI_SUCCESS {
+        return Err(transition_status);
+    }
+    if kernel_status != EFI_SUCCESS {
+        return Err(kernel_status);
     }
 
     Ok(())
@@ -554,4 +574,155 @@ pub(super) fn map_memory_map(
     }
 
     Ok(MEMORY_MAP_VIRTUAL_BASE)
+}
+
+pub(super) fn map_transition(
+    mapping: &mut MappingReport,
+    services: &BootServices,
+    cpu: &CpuState,
+) -> Result<(), EfiStatus> {
+    if !cpu.validate() || mapping.transition.is_some() {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let (code_address, code_end) = transition::code_range();
+
+    let physical_mask = cpu.physical_address_mask();
+    // Le trampoline doit occuper exactement
+    // une page alignee dans la moitie basse.
+    if code_address == 0
+        || code_address >= (1u64 << 47)
+        || code_address & !physical_mask != 0
+        || code_end.checked_sub(code_address) != Some(PAGE_SIZE)
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // SAFETY:
+    // Nous sommes toujours sous UEFI dans QEMU.
+    let identity_verified = unsafe { x86_64::verify_identity_executable(cpu, code_address) };
+
+    if !identity_verified {
+        return Err(EFI_LOAD_ERROR);
+    }
+    // Verifier que les quatres tables existantes
+    // repectent la longueur physique du CPU.
+    let last_table = mapping
+        .pml4_physical
+        .checked_add(3 * PAGE_SIZE)
+        .ok_or(EFI_LOAD_ERROR)?;
+
+    if mapping.pml4_physical == 0
+        || mapping.pml4_physical & !physical_mask != 0
+        || last_table & !physical_mask != 0
+    {
+        return Err(EFI_LOAD_ERROR);
+    }
+
+    let root_address = usize::try_from(mapping.pml4_physical).map_err(|_| EFI_LOAD_ERROR)?;
+
+    let pml4_index = ((code_address >> 39) & 0x1FF) as usize;
+    let pdpt_index = ((code_address >> 30) & 0x1FF) as usize;
+    let pd_index = ((code_address >> 21) & 0x1FF) as usize;
+    let pt_index = ((code_address >> 12) & 0x1FF) as usize;
+    // Verifier les adresses physiques utilisees
+    // par les quatres tables deja construites.
+    {
+        let existing = unsafe {
+            slice::from_raw_parts(root_address as *const u64, TABLE_PAGES * TABLE_ENTRIES)
+        };
+
+        for entry in existing {
+            if entry & PRESENT != 0 && entry & ADDRESS_MASK & !physical_mask != 0 {
+                return Err(EFI_LOAD_ERROR);
+            }
+        }
+        // Ne pas ecraser une branche existante.
+        if existing[pml4_index] != 0 {
+            return Err(EFI_LOAD_ERROR);
+        }
+    }
+    // Reserver PDPT, PD, PT de transition
+    let mut tables_physical = 0u64;
+
+    let status = unsafe {
+        (services.allocate_pages)(
+            ALLOCATE_ANY_PAGES,
+            EFI_LOADER_DATA,
+            TRANSITION_TABLE_PAGES,
+            &mut tables_physical,
+        )
+    };
+
+    if status != EFI_SUCCESS {
+        return Err(status);
+    }
+
+    let result = (|| -> Result<TransitionMapping, EfiStatus> {
+        let pdpt = tables_physical;
+        let pd = pdpt.checked_add(PAGE_SIZE).ok_or(EFI_LOAD_ERROR)?;
+        let pt = pdpt.checked_add(2 * PAGE_SIZE).ok_or(EFI_LOAD_ERROR)?;
+
+        for address in [pdpt, pd, pt] {
+            if address == 0 || address & !physical_mask != 0 {
+                return Err(EFI_LOAD_ERROR);
+            }
+        }
+
+        let address = usize::try_from(tables_physical).map_err(|_| EFI_LOAD_ERROR)?;
+        // SAFETY:
+        // Trois pages contigues viennent d'etre
+        // allouees et les tables sont incactives.
+        let entries = unsafe {
+            slice::from_raw_parts_mut(address as *mut u64, TRANSITION_TABLE_PAGES * TABLE_ENTRIES)
+        };
+
+        entries.fill(0);
+
+        let table_flags = PRESENT | WRITABLE;
+
+        entries[pdpt_index] = pd | table_flags;
+
+        entries[TABLE_ENTRIES + pd_index] = pt | table_flags;
+        // Mapping d'idetité du trampoline.
+        // Lecture seule et exectable.
+        entries[2 * TABLE_ENTRIES + pt_index] = code_address | PRESENT;
+        // Verifier les trois entrees.
+        if entries[pdpt_index] != (pd | table_flags)
+            || entries[TABLE_ENTRIES + pd_index] != (pt | table_flags)
+            || entries[2 * TABLE_ENTRIES + pt_index] != (code_address | PRESENT)
+        {
+            return Err(EFI_LOAD_ERROR);
+        }
+        // Relier la branche à la PML4 existante.
+        // Cette operation est effectuee en dernier.
+        let root = unsafe { slice::from_raw_parts_mut(root_address as *mut u64, TABLE_ENTRIES) };
+
+        if root[pml4_index] != 0 {
+            return Err(EFI_LOAD_ERROR);
+        }
+
+        root[pml4_index] = pdpt | table_flags;
+
+        Ok(TransitionMapping {
+            code_address,
+            tables_physical,
+        })
+    })();
+
+    match result {
+        Ok(report) => {
+            mapping.transition = Some(report);
+            Ok(())
+        }
+        Err(status) => {
+            let free_status =
+                unsafe { (services.free_pages)(tables_physical, TRANSITION_TABLE_PAGES) };
+
+            if free_status != EFI_SUCCESS {
+                return Err(free_status);
+            }
+
+            Err(status)
+        }
+    }
 }
